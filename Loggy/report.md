@@ -1,7 +1,19 @@
 # HW1: Loggy - a logical time logger
 ## Introduction
+In distributed systems, establishing a global, total order of events is notoriously challenging due to the absence of a synchronized global clock and unpredictable network delays. To trace, debug, and reason about execution order across asynchronous nodes, logical clocks are used instead of physical wall-clock time.
 
+This report evaluates three implementations of a centralized logging system (Loggy) in Erlang:
+
+1. Unsynchronized Local Clocks (No Logical Time)
+
+2. Lamport Timestamps (Scalar Logical Time)
+
+3. Vector Clocks (Causality Tracking)
 ## First attempt - without Lamport time
+### Description & Execution Results
+
+In this initial implementation, nodes send log messages to the central logger without any logical time mechanism (na / Not Available). The logger simply prints the events as they arrive via Erlang process messaging.
+
 **result**:
 ```
 test:run(1000, 100).
@@ -76,7 +88,26 @@ log: na george {received,{hello,16}}
 log: na john {sending,{hello,69}}
 stop
 ```
+### Analysis
+As seen in lines 1–2 of the output, paul logs the reception of {hello,50} before john logs the sending of {hello,50}. This violates basic causality: an effect cannot precede its cause.
+
+- Pros:
+
+    - Zero Overhead: No clock synchronization, metadata management, or extra computation required.
+
+    - Simplicity: Trivial to write and execute.
+
+- Cons:
+
+    - Violates Causality: Messages appear received before they are sent due to asynchronous logging message delivery.
+
+    - No Event Ordering: Impossible to reconstruct the chronological or causal sequence of distributed events.
+
 ## Sceond attempt - with lamport time
+### Description & Execution Results
+Each node maintains a scalar logical counter.
+- Internal/Send Rule: $L_{node} = L_{node} + 1$
+- Receive Rule: $L_{node} = \max(L_{node}, L_{msg}) + 1$
 ```
 test:run(1000, 100).
 log: 1 ringo {sending,{hello,31}}
@@ -150,8 +181,20 @@ log: 36 john {sending,{hello,69}}
 log: 36 george {received,{hello,16}}
 log: 37 paul {received,{hello,69}}
 ```
+### Analysis
+Lamport time imposes a partial order on events ($e_1 \to e_2 \implies L(e_1) < L(e_2)$).Notice that {hello,50} is sent by john at $L=1$ and received by paul at $L=2$, preserving the causal send-receive constraint.
+- Pros:
+    - Ensures Causal Consistency: Guarantees $L(send) < L(receive)$ for any message.
+    - Low Metadata Overhead: Adds only a single integer timestamp to messages and state.
+- Cons:
+    - Cannot Characterize Concurrency: If $L(a) < L(b)$, it does not imply $a \to b$. $a$ and $b$ could be independent (concurrent) events.
+    - Clock Jumps: A process receiving a message from a node with a high clock value experiences artificial "jumps" in its local logical time, losing granular event pacing.
 
 ## Final attempt - Vector Clocks
+### Description & Execution Results
+Each node maintains a vector clock $V$, where $V[i]$ represents the local clock value of process $i$.
+- Local/Send Event: $V_{node}[node] = V_{node}[node] + 1$
+- Receive Event: $V_{node}[k] = \max(V_{node}[k], V_{msg}[k])$ for all $k$, then increment $V_{node}[node]$.
 ```
 test:run(1000, 100).
 log: [{john,1}] john {sending,{hello,50}}
@@ -225,3 +268,26 @@ log: [{paul,11},{george,20},{ringo,15},{john,16}] john {sending,{hello,69}}
 log: [{ringo,16},{george,22},{paul,11},{john,13}] george {received,{hello,16}}
 stop
 ```
+### Analysis
+Vector clocks capture full causal history. Comparing two vectors allows us to determine if event $A$ happened before event $B$ ($A \to B$), if $B \to A$, or if $A \parallel B$ (concurrent).
+For instance:
+- john sends {hello,50} at [{john,1}].
+- paul receives it at [{paul,1},{john,1}], showing explicit causal dependency on john's state at 1.
+- Pros:
+    - Exact Causality Tracking: $V(a) < V(b) \iff a \to b$. Perfectly distinguishes between causal dependency and concurrent/independent events.
+    - No False Dependencies: Eliminates ambiguity in distributed state reconstruction.
+- Cons:
+    - High Message & Memory Overhead: Vector size grows linearly $O(N)$ with the number of nodes $N$.
+    - Dynamism Limitations: Requires knowing or dynamically updating the set of all active node identities.
+
+## Future Improvements
+To transition this logging implementation into a production-grade distributed tracer (similar to Jaeger or Zipkin), several enhancements can be introduced:
+1. Logger Safe-Delivery Buffer (Holdback Queue):
+    - Problem: Currently, the logger prints messages as soon as they arrive in its mailbox, meaning log lines on screen can still appear out-of-order due to network jitter.
+    - Solution: Implement a holdback queue using a safe clock condition. The logger holds logs in a buffer and only flushes/prints an event at time $T$ once it has received messages with timestamp $\ge T$ from all worker nodes.
+2. Dotted Version Vectors / Dynamic Vector Clocks:
+    - Problem: Standard vector clocks ($O(N)$) scale poorly when nodes dynamically join or leave the system.
+    - Solution: Adopt Dotted Version Vectors or Interval Tree Clocks (ITC) to support dynamic membership without unbounded vector growth.
+3. Total Order Multicast Integration:
+    - Problem: Lamport timestamps establish a partial order; concurrent events with equal logical timestamps are arbitrarily ordered.
+    - Solution: Break ties deterministically using node IDs (e.g., $(L, Node\_ID)$) to establish a deterministic total order across all nodes.
