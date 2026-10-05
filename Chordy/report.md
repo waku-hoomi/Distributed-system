@@ -113,13 +113,13 @@ down(Ref, Predecessor, {_, Ref, _}, {Nkey, Npid}) ->
 
 Compare one client making 4000 requests with four clients making 1000 each. Repeat with 1, 2, and 4 storage nodes, shared and distributed contacts, and 10000 total requests.
 
-| Configuration | Add time | Lookup time | Errors |
-|---|---|---|---|
-| 1 node, 4 clients, 4000 total | Not measured | Not measured | Not measured |
-| 2 nodes, shared contacts | Not measured | Not measured | Not measured |
-| 2 nodes, distributed contacts | Not measured | Not measured | Not measured |
-| 4 nodes, distributed contacts | Not measured | Not measured | Not measured |
-| 4 nodes, 10000 total | Not measured | Not measured | Not measured |
+| Configuration | Add time (ms) | Lookup time (ms) | Errors (add / lookup) |
+|---|---:|---:|---|
+| 1 node, 4 clients, 4000 total | 73.547 | 21.824 | 0 / 0 |
+| 2 nodes, shared contacts, 4000 total | 39.383 | 19.194 | 0 / 0 |
+| 2 nodes, distributed contacts, 4000 total | 34.571 | 18.004 | 0 / 0 |
+| 4 nodes, distributed contacts, 4000 total | 21.765 | 16.002 | 0 / 0 |
+| 4 nodes, distributed contacts, 10000 total | 92.411 | 55.494 | 0 / 0 |
 
 **Answers:** Four clients contacting one storage process do not create fourfold storage parallelism. More storage nodes reduce local list sizes and enable parallel work, but may increase forwarding. A common entry node can become a bottleneck. Larger datasets increase linear scan costs. The limiting factor may be storage scans, mailbox queueing, or network latency; actual results are needed to identify it.
 
@@ -249,3 +249,114 @@ Register the storage process with `register(entry, A)`. Other nodes can join thr
 The report follows *Chordy: A Distributed Hash Table* (Montelius, Vlassov, and Segeljakt, 2024). Routing background: [original Chord paper](https://pdos.csail.mit.edu/papers/chord:sigcomm01/chord_sigcomm.pdf).
 
 This report was prepared with AI assistance from the supplied code and handout. Complete the measurements and verify the final implementation before submission. The commands have not been executed in the report-writing environment.
+
+```
+RunBench = fun(Ids, ContactIndexes, Count) ->
+    %% 创建空环
+    [FirstId | OtherIds] = Ids,
+    First = node2:start(FirstId),
+    Nodes = [First | [node2:start(Id, First) || Id <- OtherIds]],
+    timer:sleep(5000),
+
+    Parent = self(),
+    Ref = make_ref(),
+
+    %% 每个客户端保存自己的键列表
+    Workers = [
+        spawn(fun() ->
+            rand:seed(exsplus, {I, I + 100, I + 200}),
+            Keys = test:keys(Count),
+            Contact = lists:nth(Index, Nodes),
+            Parent ! {ready, Ref, self()},
+
+            receive {begin_add, Ref} -> ok end,
+            Added = [test:add(K, gurka, Contact) || K <- Keys],
+            AddErrors = length([R || R <- Added, R =/= ok]),
+            Parent ! {add_done, Ref, self(), AddErrors},
+
+            receive {begin_lookup, Ref} -> ok end,
+            Results = [test:lookup(K, Contact) || K <- Keys],
+            LookupErrors = length([
+                R || {K, R} <- lists:zip(Keys, Results),
+                     R =/= {K, gurka}
+            ]),
+            Parent ! {lookup_done, Ref, self(), LookupErrors}
+        end)
+        || {I, Index} <- lists:zip(lists:seq(1, 4), ContactIndexes)
+    ],
+
+    try
+        %% 等所有客户端准备好，排除生成键的时间
+        [receive
+            {ready, Ref, W} -> ok
+         after 10000 -> error(client_not_ready)
+         end || W <- Workers],
+
+        %% 同时开始添加，并测量整个阶段
+        {AddUs, AddErrorsList} = timer:tc(fun() ->
+            [W ! {begin_add, Ref} || W <- Workers],
+            [receive
+                {add_done, Ref, W, Errors} -> Errors
+             after 120000 -> error(add_batch_timeout)
+             end || W <- Workers]
+        end),
+
+        %% 所有添加结束后，同时开始查询
+        {LookupUs, LookupErrorsList} = timer:tc(fun() ->
+            [W ! {begin_lookup, Ref} || W <- Workers],
+            [receive
+                {lookup_done, Ref, W, Errors} -> Errors
+             after 120000 -> error(lookup_batch_timeout)
+             end || W <- Workers]
+        end),
+
+        Summary = {
+            length(Nodes),
+            4 * Count,
+            AddUs / 1000,
+            LookupUs / 1000,
+            lists:sum(AddErrorsList),
+            lists:sum(LookupErrorsList)
+        },
+
+        io:format(
+            "nodes=~p, total=~p~n"
+            "add=~.3f ms, lookup=~.3f ms, errors=~p/~p~n",
+            tuple_to_list(Summary)
+        ),
+        Summary
+    after
+        [exit(P, kill) || P <- Workers ++ Nodes]
+    end
+end.
+```
+```
+RunBench(节点Id列表, 四个客户端的入口编号, 每客户端请求数).
+R1 = RunBench(
+    [250000000],
+    [1, 1, 1, 1],
+    1000
+).
+R2 = RunBench(
+    [250000000, 750000000],
+    [1, 1, 1, 1],
+    1000
+).
+R3 = RunBench(
+    [250000000, 750000000],
+    [1, 1, 2, 2],
+    1000
+).
+R4 = RunBench(
+    [250000000, 500000000, 750000000, 1000000000],
+    [1, 2, 3, 4],
+    1000
+).
+R5 = RunBench(
+    [250000000, 500000000, 750000000, 1000000000],
+    [1, 2, 3, 4],
+    2500
+).
+[R1, R2, R3, R4, R5].
+{节点数, 总请求数, 添加毫秒, 查询毫秒, 添加错误数, 查询错误数}
+```

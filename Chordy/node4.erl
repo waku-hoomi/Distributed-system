@@ -5,6 +5,7 @@
 
 start(Id) ->
     start(Id, nil).
+
 start(Id, Peer) ->
     timer:start(),
     spawn(fun() -> init(Id, Peer) end).
