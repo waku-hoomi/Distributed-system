@@ -1,5 +1,5 @@
 # Report: Chordy — A Distributed Hash Table
-
+**Group Member: Haomin Zhang, Feiyu Chen**
 ## 1. Introduction
 
 This assignment implements **Chordy**, a distributed hash table developed through four versions, from `node1` to `node4`. Each Erlang process represents a ring member. Nodes exchange asynchronous messages to maintain their neighbors, locate keys, transfer data during joins, and recover from failures.
